@@ -30,7 +30,11 @@ use crate::vec::{MetricVec, MetricVecBuilder};
 /// tailored to broadly measure the response time (in seconds) of a
 /// network service. Most likely, however, you will be required to define
 /// buckets customized to your use case.
-pub const DEFAULT_BUCKETS: &[f64; 11] = &[
+pub const DEFAULT_BUCKETS: &[u64; 11] = &[
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+
+pub const DEFAULT_BOUNDS: &[f64; 11] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
@@ -49,29 +53,29 @@ fn check_bucket_lable(label: &str) -> Result<()> {
     Ok(())
 }
 
-fn check_and_adjust_buckets(mut buckets: Vec<f64>) -> Result<Vec<f64>> {
-    if buckets.is_empty() {
-        buckets = Vec::from(DEFAULT_BUCKETS as &'static [f64]);
+fn check_and_adjust_bounds(mut bounds: Vec<f64>) -> Result<Vec<f64>> {
+    if bounds.is_empty() {
+        bounds = Vec::from(DEFAULT_BOUNDS as &'static [f64]);
     }
 
-    for (i, upper_bound) in buckets.iter().enumerate() {
-        if i < (buckets.len() - 1) && *upper_bound >= buckets[i + 1] {
+    for (i, upper_bound) in bounds.iter().enumerate() {
+        if i < (bounds.len() - 1) && *upper_bound >= bounds[i + 1] {
             return Err(Error::Msg(format!(
-                "histogram buckets must be in increasing \
+                "histogram bounds must be in increasing \
                  order: {} >= {}",
                 upper_bound,
-                buckets[i + 1]
+                bounds[i + 1]
             )));
         }
     }
 
-    let tail = *buckets.last().unwrap();
+    let tail = *bounds.last().unwrap();
     if tail.is_sign_positive() && tail.is_infinite() {
         // The +Inf bucket is implicit. Remove it here.
-        buckets.pop();
+        bounds.pop();
     }
 
-    Ok(buckets)
+    Ok(bounds)
 }
 
 /// A struct that bundles the options for creating a [`Histogram`](::Histogram) metric. It is
@@ -82,12 +86,20 @@ pub struct HistogramOpts {
     /// A container holding various options.
     pub common_opts: Opts,
 
+    /// The initial buckets value
+    pub buckets: Vec<u64>,
+
     /// Defines the buckets into which observations are counted. Each
     /// element in the slice is the upper inclusive bound of a bucket. The
     /// values must be sorted in strictly increasing order. There is no need
     /// to add a highest bucket with +Inf bound, it will be added
     /// implicitly. The default value is DefBuckets.
-    pub buckets: Vec<f64>,
+    pub bounds: Vec<f64>,
+
+    /// the initial sum of sample value 
+    pub sum: f64,
+    /// the initial count of sample
+    pub count: u64,
 }
 
 impl HistogramOpts {
@@ -95,7 +107,10 @@ impl HistogramOpts {
     pub fn new<S: Into<String>>(name: S, help: S) -> HistogramOpts {
         HistogramOpts {
             common_opts: Opts::new(name, help),
-            buckets: Vec::from(DEFAULT_BUCKETS as &'static [f64]),
+            bounds: Vec::from(DEFAULT_BOUNDS as &'static [f64]),
+            buckets: Vec::from(DEFAULT_BUCKETS as &'static [u64]),
+            sum: 0.0,
+            count: 0,
         }
     }
 
@@ -141,8 +156,30 @@ impl HistogramOpts {
     }
 
     /// `buckets` set the buckets.
-    pub fn buckets(mut self, buckets: Vec<f64>) -> Self {
+    pub fn buckets(mut self, buckets: Vec<u64>) -> Self {
         self.buckets = buckets;
+        self
+    }
+
+    /// Patch
+    /// `bounds`
+    pub fn bounds(mut self, bounds: Vec<f64>) -> Self {
+        self.bounds = bounds;
+        if self.buckets.len() != self.bounds.len() {
+            self.buckets = vec![0; self.bounds.len()];
+        }
+        self
+    }
+
+    /// Patch
+    pub fn sum(mut self, sum: f64) -> Self {
+        self.sum = sum;
+        self
+    }
+
+    /// Patch
+    pub fn count(mut self, count: u64) -> Self {
+        self.count = count;
         self
     }
 }
@@ -157,7 +194,10 @@ impl From<Opts> for HistogramOpts {
     fn from(opts: Opts) -> HistogramOpts {
         HistogramOpts {
             common_opts: opts,
-            buckets: Vec::from(DEFAULT_BUCKETS as &'static [f64]),
+            bounds: Vec::from(DEFAULT_BOUNDS as &'static [f64]),
+            buckets: Vec::from(DEFAULT_BUCKETS as &'static [u64]),
+            sum: 0.0,
+            count: 0,
         }
     }
 }
@@ -185,19 +225,24 @@ impl HistogramCore {
         }
         let pairs = make_label_pairs(&desc, label_values);
 
-        let buckets = check_and_adjust_buckets(opts.buckets.clone())?;
-
-        let mut counts = Vec::new();
-        for _ in 0..buckets.len() {
-            counts.push(AtomicU64::new(0));
+        let bounds = check_and_adjust_bounds(opts.bounds.clone())?;
+        let mut counts: Vec<AtomicU64> = vec![];
+        if opts.buckets.is_empty() {
+            counts.reserve(bounds.len());
+            for _ in 0..bounds.len() {
+                counts.push(AtomicU64::new(0));
+            }
+        } else {
+            counts = opts.buckets.iter().map(|c| {AtomicU64::new(*c)}).collect();
+            assert_eq!(bounds.len(), counts.len());
         }
 
         Ok(HistogramCore {
             desc,
             label_pairs: pairs,
-            sum: AtomicF64::new(0.0),
-            count: AtomicU64::new(0),
-            upper_bounds: buckets,
+            sum: AtomicF64::new(opts.sum),
+            count: AtomicU64::new(opts.count),
+            upper_bounds: bounds,
             counts,
         })
     }
@@ -795,7 +840,7 @@ mod tests {
         assert_eq!(proto_histogram.get_bucket().len(), DEFAULT_BUCKETS.len());
 
         let buckets = vec![1.0, 2.0, 3.0];
-        let opts = HistogramOpts::new("test2", "test help").buckets(buckets.clone());
+        let opts = HistogramOpts::new("test2", "test help").bounds(buckets.clone());
         let histogram = Histogram::with_opts(opts).unwrap();
         let mut mfs = histogram.collect();
         assert_eq!(mfs.len(), 1);
@@ -861,7 +906,7 @@ mod tests {
         ];
 
         for (buckets, is_ok, length) in table {
-            let got = check_and_adjust_buckets(buckets);
+            let got = check_and_adjust_bounds(buckets);
             assert_eq!(got.is_ok(), is_ok);
             if is_ok {
                 assert_eq!(got.unwrap().len(), length);
@@ -938,7 +983,7 @@ mod tests {
         let buckets = vec![1.0, 2.0, 3.0];
         let vec = HistogramVec::new(
             HistogramOpts::new("test_histogram_vec", "test histogram vec help")
-                .buckets(buckets.clone()),
+                .bounds(buckets.clone()),
             &labels,
         )
         .unwrap();
@@ -959,7 +1004,7 @@ mod tests {
     fn test_histogram_local() {
         let buckets = vec![1.0, 2.0, 3.0];
         let opts = HistogramOpts::new("test_histogram_local", "test histogram local help")
-            .buckets(buckets.clone());
+            .bounds(buckets.clone());
         let histogram = Histogram::with_opts(opts).unwrap();
         let local = histogram.local();
 

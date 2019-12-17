@@ -140,7 +140,7 @@ macro_rules! histogram_opts {
 
     ($NAME:expr, $HELP:expr, $BUCKETS:expr) => {{
         let hopts = histogram_opts!($NAME, $HELP);
-        hopts.buckets($BUCKETS)
+        hopts.bounds($BUCKETS)
     }};
 
     ($NAME:expr, $HELP:expr, $BUCKETS:expr, $CONST_LABELS:expr) => {{
