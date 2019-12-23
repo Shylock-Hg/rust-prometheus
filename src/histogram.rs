@@ -235,6 +235,20 @@ impl HistogramCore {
 
         h
     }
+
+    /// Reset the statistics
+    pub fn reset(&self, sum: f64, count: u64, buckets: Vec<u64>) -> Result<()> {
+        if buckets.len() == self.counts.len() {
+            self.sum.set(sum);
+            self.count.set(count);
+            for i in 0..buckets.len() {
+                self.counts[i].set(buckets[i]);
+            }
+            return Ok(());
+        } else {
+            return Err(Error::Msg("Conflict buckets length".to_string()));
+        }
+    }
 }
 
 enum Instant {
@@ -406,6 +420,11 @@ impl Histogram {
     /// Return a [`LocalHistogram`](::local::LocalHistogram) for single thread usage.
     pub fn local(&self) -> LocalHistogram {
         LocalHistogram::new(self.clone())
+    }
+
+    /// Reset statistics
+    pub fn reset(&self, sum: f64, count: u64, buckets: Vec<u64>) -> Result<()> {
+        self.core.reset(sum, count, buckets)
     }
 }
 
